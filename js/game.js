@@ -1003,6 +1003,14 @@
   }
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
+  /* A release the canvas never sees — off-window, or iOS dropping the
+     capture with lostpointercapture and no pointerup — used to leave
+     `drag` set for the rest of the scene, and pointerdown returns early
+     while one is in flight: the ⊕s and the guide froze and the scene
+     was scored on an untouched guess. */
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('lostpointercapture', endDrag);
 
   /* keyboard: arrows nudge (shift = fine), space swaps the active ⊕,
      enter locks in / advances, escape leaves trace mode */
