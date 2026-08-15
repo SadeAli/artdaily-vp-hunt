@@ -33,6 +33,25 @@
   var H_FULL = 0.015, H_ZERO = 0.12;   /* fractions of canvas height */
   var V_FULL = 0.02, V_ZERO = 0.15;    /* fractions of canvas width  */
 
+  /* Scene 1 is where the words "vanishing point" and "horizon" are still
+     being learned, so its bands open wide and tighten to the values above
+     by scene 3. Before this the GEOMETRY ramped (scene 3 shoves a VP to
+     the frame edge) while the bands did not, so difficulty compounded
+     twice and a first-timer's honest read scored 20-40. */
+  var BAND_EASE = [1.5, 1.2, 1.0];
+  function bandEase(sceneIdx) {
+    var k = BAND_EASE[sceneIdx];
+    return (typeof k === 'number' && isFinite(k)) ? k : 1;
+  }
+
+  /* A relative band collapses on a small screen: 0.015·H is 6.5px on a
+     desktop sheet and 3px on a phone, i.e. the least precise device gets
+     the strictest standard for the identical drill. Floor both bands in
+     absolute pixels, and ease that floor for the hardware in hand — a
+     trackpad cannot creep the way a mouse on a desk can. */
+  var H_FULL_PX = 8, H_ZERO_PX = 40;
+  var V_FULL_PX = 10, V_ZERO_PX = 48;
+
   function clampRange(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
   function clamp01(v) { return clampRange(v, 0, 1); }
 
@@ -44,25 +63,33 @@
   /* Full marks within H_FULL of the line, zero at H_ZERO of the canvas
      height away. Degenerate input (zero/NaN size or coords) scores 0,
      never NaN. */
-  function horizonScore(guessY, trueY, H) {
+  function horizonScore(guessY, trueY, H, ease, slop) {
     if (!isFinite(guessY) || !isFinite(trueY) || !(H > 0)) return 0;
-    return bandScore(Math.abs(guessY - trueY) / H, H_FULL, H_ZERO);
+    var e = (typeof ease === 'number' && isFinite(ease) && ease > 0) ? ease : 1;
+    var s = (typeof slop === 'number' && isFinite(slop) && slop > 0) ? slop : 1;
+    var full = Math.max(H_FULL * H, H_FULL_PX * s) * e;
+    var zero = Math.max(H_ZERO * H, H_ZERO_PX * s) * e;
+    return bandScore(Math.abs(guessY - trueY), full, zero);
   }
 
   /* Full marks within V_FULL of the point, zero at V_ZERO of the canvas
-     width away. */
-  function vpScore(gx, gy, tx, ty, W) {
+     width away — with the same pixel floor and per-hardware ease. */
+  function vpScore(gx, gy, tx, ty, W, ease, slop) {
     if (!isFinite(gx) || !isFinite(gy) || !isFinite(tx) || !isFinite(ty) || !(W > 0)) return 0;
-    return bandScore(Math.hypot(gx - tx, gy - ty) / W, V_FULL, V_ZERO);
+    var e = (typeof ease === 'number' && isFinite(ease) && ease > 0) ? ease : 1;
+    var s = (typeof slop === 'number' && isFinite(slop) && slop > 0) ? slop : 1;
+    var full = Math.max(V_FULL * W, V_FULL_PX * s) * e;
+    var zero = Math.max(V_ZERO * W, V_ZERO_PX * s) * e;
+    return bandScore(Math.hypot(gx - tx, gy - ty), full, zero);
   }
 
   /* Match each guess to a distinct true VP — never both to the same
      one. Of the two possible pairings, the better-scoring one wins;
      `swapped` says the left ⊕ was read against the right VP, so the
      reveal can draw honest connectors. */
-  function vpPairing(g1, g2, t1, t2, W) {
-    var a = [vpScore(g1.x, g1.y, t1.x, t1.y, W), vpScore(g2.x, g2.y, t2.x, t2.y, W)];
-    var b = [vpScore(g1.x, g1.y, t2.x, t2.y, W), vpScore(g2.x, g2.y, t1.x, t1.y, W)];
+  function vpPairing(g1, g2, t1, t2, W, ease, slop) {
+    var a = [vpScore(g1.x, g1.y, t1.x, t1.y, W, ease, slop), vpScore(g2.x, g2.y, t2.x, t2.y, W, ease, slop)];
+    var b = [vpScore(g1.x, g1.y, t2.x, t2.y, W, ease, slop), vpScore(g2.x, g2.y, t1.x, t1.y, W, ease, slop)];
     return (a[0] + a[1] >= b[0] + b[1])
       ? { scores: a, swapped: false }
       : { scores: b, swapped: true };
@@ -81,7 +108,20 @@
      scatter matrix), so a stroke drawn steeply is fitted as fairly as
      a flat one. Returns null for anything too short to mean an edge —
      a stray tap must cost nothing. */
-  function fitStrokeLine(pts, minLen) {
+  /* Every mouse and trackpad drag opens with an acceleration hook and
+     closes with a deceleration hook, and a total-least-squares fit
+     weights those end samples exactly as much as the honest middle. On a
+     short stroke they dominate. Drop the first and last tenth before
+     fitting — the middle is the part the hand actually meant. */
+  function trimHooks(pts) {
+    var n = pts.length;
+    if (n < 12) return pts;
+    var cut = Math.floor(n * 0.1);
+    return pts.slice(cut, n - cut);
+  }
+
+  function fitStrokeLine(raw, minLen) {
+    var pts = trimHooks(raw || []);
     var n = pts.length, i, sx = 0, sy = 0, dx, dy;
     if (n < 2) return null;
     for (i = 0; i < n; i++) { sx += pts[i].x; sy += pts[i].y; }
@@ -108,12 +148,20 @@
     };
   }
 
-  /* Where two fitted edges cross — null when they are too near
-     parallel for the crossing to mean anything (|sin θ| < 0.05 ≈ 3°). */
+  /* Where two fitted edges cross — null when they are too near parallel
+     for the crossing to mean anything.
+     The guard used to sit at |sin θ| < 0.05, i.e. 3°. But between 3° and
+     ~12° the crossing is wildly unstable: 3° of wobble in one line moves
+     it by ~0.3× the distance to it, so 60px at 200px out. The drill
+     accepted that silently and then WROTE it into the player's answer, so
+     a beginner tracing two near-parallel roof lines with a mouse got
+     garbage handed back as their own construction. 0.20 ≈ 11.5°, and the
+     caller now says out loud why a pair was refused. */
+  var PARALLEL_SIN = 0.20;
   function intersectFits(l1, l2) {
     if (!l1 || !l2) return null;
     var d = l1.ux * l2.uy - l1.uy * l2.ux;
-    if (!isFinite(d) || Math.abs(d) < 0.05) return null;
+    if (!isFinite(d) || Math.abs(d) < PARALLEL_SIN) return null;
     var t = ((l2.x - l1.x) * l2.uy - (l2.y - l1.y) * l2.ux) / d;
     if (!isFinite(t)) return null;
     return { x: l1.x + l1.ux * t, y: l1.y + l1.uy * t };
@@ -355,20 +403,35 @@
   var traceVP = [];   /* the crossings, normalized */
   var rawPts = null;  /* the stroke under the finger, in px */
 
+  /* "recedes" was in all four prompts and explained nowhere. Say what a
+     receding edge IS instead: one that runs away from you into the
+     picture and gets smaller. */
   var TRACE_PROMPT = [
-    'trace an edge that recedes to the LEFT — drag along it (1 of 2).',
-    'now a second LEFT-going edge, at a different height (2 of 2).',
-    'good — now an edge that recedes to the RIGHT (1 of 2).',
-    'one more RIGHT-going edge (2 of 2).',
+    'drag along a box edge that runs away from you toward the LEFT — one of the long edges going into the distance (1 of 2).',
+    'now a second edge heading the same way, but higher or lower in the picture (2 of 2).',
+    'good — now an edge running away toward the RIGHT (1 of 2).',
+    'one more RIGHT-going edge, at a different height (2 of 2).',
   ];
 
   function guessHint() {
     return 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND +
-      ' — drag the dashed guide onto the horizon and a ⊕ onto each vanishing point. ' +
-      'the ⊕s ride the line: pull one up or down and the horizon comes with it.';
+      ' — a vanishing point is where a set of parallel edges appears to meet in the distance.' +
+      ' drag the dashed guide onto the eye level (the horizon) and a ⊕ onto each vanishing point.' +
+      ' the ⊕s ride the line: pull one up or down and the horizon comes with it.' +
+      (sceneIdx === 0 ? ' this first one is scored gently while you find your feet.' : '');
+  }
+
+  function syncLockButton() {
+    /* Locking mid-trace scored a faded guess the player was not even
+       looking at. The button comes back the moment the four strokes
+       resolve (applyTrace flips the mode back to 'drag'). */
+    if (phase !== 'guess') return;
+    btnLock.disabled = (mode === 'trace' && strokes.length > 0);
+    btnLock.textContent = btnLock.disabled ? 'finish the trace first' : 'lock it in';
   }
 
   function setTraceButton() {
+    syncLockButton();
     if (mode !== 'trace') {
       btnTrace.textContent = 'trace edges ✎';
       btnTrace.setAttribute('aria-pressed', 'false');
@@ -431,8 +494,10 @@
     var g2 = { x: guess.v2 * W, y: guess.y * H };
     var t1 = { x: scene.vpL.x * W, y: scene.vpL.y * H };
     var t2 = { x: scene.vpR.x * W, y: scene.vpR.y * H };
-    var h = horizonScore(guess.y * H, scene.ty * H, H);
-    var pair = vpPairing(g1, g2, t1, t2, W);
+    var ease = bandEase(sceneIdx);
+    var slop = ArtDaily.ease(1); /* pen 1.0, finger 1.5, mouse/trackpad 2.0 */
+    var h = horizonScore(guess.y * H, scene.ty * H, H, ease, slop);
+    var pair = vpPairing(g1, g2, t1, t2, W, ease, slop);
     var s = sceneScore(h, pair.scores[0], pair.scores[1]);
     sceneScores.push(s);
     lastPair = pair;
@@ -441,8 +506,8 @@
     rawPts = null;
     phase = 'reveal';
     hint.textContent = 'scene ' + (sceneIdx + 1) + ' — ' + Math.round(s) + '/100 ' +
-      '(horizon ' + Math.round(h) + ' · vps ' + Math.round(pair.scores[0]) + ', ' +
-      Math.round(pair.scores[1]) + '). the accent lines are the truth.';
+      '(eye level ' + Math.round(h) + ' · vanishing points ' + Math.round(pair.scores[0]) + ', ' +
+      Math.round(pair.scores[1]) + '). the coloured lines are the real answer.';
     hudScore.textContent = String(Math.round(roundScore(sceneScores)));
     var isLast = sceneIdx === SCENES_PER_ROUND - 1;
     btnLock.textContent = isLast ? 'finish round' : 'next scene →';
@@ -613,6 +678,24 @@
       ctx.stroke();
     }
     if (rawPts && rawPts.length > 1) {
+      /* extend the LIVE stroke too, not only the committed ones: a mouse
+         user watching the ray sweep toward the vanishing point can
+         correct mid-drag, which turns trace mode from a shot in the dark
+         into something you can steer */
+      var live = fitStrokeLine(rawPts, 0);
+      if (live) {
+        dx = live.b.x - live.a.x; dy = live.b.y - live.a.y;
+        k = 4000 / Math.max(1e-6, Math.hypot(dx, dy));
+        ctx.strokeStyle = readable(c);
+        ctx.globalAlpha = 0.4;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(live.a.x - dx * k, live.a.y - dy * k);
+        ctx.lineTo(live.b.x + dx * k, live.b.y + dy * k);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
       ctx.globalAlpha = 0.75;
       ctx.lineWidth = 2.5;
       ctx.lineCap = 'round';
@@ -765,11 +848,16 @@
   var drag = null; /* { id, kind: 'line'|'v1'|'v2', off } */
 
   function finishStroke() {
-    var fit = fitStrokeLine(rawPts, 0.06 * W);
+    /* Short strokes are the dominant source of angular error: a 42px
+       drag with 3px of wobble at its ends carries ~8° of tilt, which is
+       ~42px of crossing error 300px out. Refusing them costs nothing —
+       the refusal is free and friendly — so ask for a real one. */
+    var fit = fitStrokeLine(rawPts, 0.12 * W);
     rawPts = null;
     if (!fit) {
-      showToast('too short — drag along an edge', false);
-      hint.textContent = 'that stroke was too short to read. ' + TRACE_PROMPT[strokes.length];
+      showToast('drag further along the edge', false);
+      hint.textContent = 'that stroke was too short to read an angle from — run it most of the way along the edge. ' +
+        TRACE_PROMPT[strokes.length];
       draw();
       return;
     }
@@ -778,9 +866,10 @@
       var prev = strokes[strokes.length - 1];
       var cross = intersectFits(fitFromStored(prev), fit);
       if (!cross) {
-        showToast('those two are parallel', false);
-        hint.textContent = 'those two edges run parallel, so they never cross — ' +
-          'pick edges at different heights. ' + TRACE_PROMPT[strokes.length];
+        showToast('those two edges are too close in angle', false);
+        hint.textContent = 'those two edges are too close in angle for the crossing to mean anything — ' +
+          'a hair of wobble would move it right across the picture. pick edges further apart in height. ' +
+          TRACE_PROMPT[strokes.length];
         draw();
         return;
       }
@@ -810,7 +899,7 @@
     guess.v2 = clampRange(R.x / W, 0.02, 0.98);
     guess.y = clampRange((L.y + R.y) / 2 / H, 0.04, 0.96);
     mode = 'drag';
-    hint.textContent = 'your strokes cross there — and the horizon is the level line ' +
+    hint.textContent = 'your strokes cross there — and the eye level is the flat line ' +
       'through both crossings. nudge the ⊕s if you like, then lock it in.';
   }
 
@@ -841,8 +930,13 @@
   /* One pointer at a time, in either mode: a second finger landing mid-
      drag used to steal the gesture and leave the first one's capture
      dangling. */
+  var lastPenAt = 0;
   canvas.addEventListener('pointerdown', function (ev) {
-    if (phase !== 'guess' || drag) return;
+    if (phase !== 'guess') return;
+    /* palm rejection: a pen always beats a palm that landed first */
+    if (ev.pointerType === 'pen') lastPenAt = Date.now();
+    else if (ev.pointerType === 'touch' && Date.now() - lastPenAt < 500) return;
+    if (drag) return;
     ev.preventDefault();
     canvas.focus({ preventScroll: true });
     var p = pointerPos(ev);
@@ -863,10 +957,16 @@
        whole line with it vertically — so a pull upward always raises the
        horizon instead of silently sliding a marker sideways, and the
        lesson (the ⊕s ride the line) is in the hand, not just the hint. */
-    if (Math.abs(p.y - gy) <= 22 && Math.min(d1, d2) > 26) {
+    /* Grab zones scale with the hardware: a screenless tablet cannot see
+       its own hand, so acquiring a small target is the hardest thing it
+       does, and it needs the biggest zones despite being the most
+       precise instrument. */
+    var markR = ArtDaily.startRadius(26);
+    var lineR = ArtDaily.startRadius(22);
+    if (Math.abs(p.y - gy) <= lineR && Math.min(d1, d2) > markR) {
       kind = 'line';
       off = gy - p.y;
-    } else if (d1 <= 26 || d2 <= 26) {
+    } else if (d1 <= markR || d2 <= markR) {
       kind = (d1 <= d2) ? 'v1' : 'v2';
       selMarker = (kind === 'v1') ? 1 : 2;
       off = (kind === 'v1' ? guess.v1 : guess.v2) * W - p.x;

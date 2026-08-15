@@ -31,3 +31,28 @@ them, and a connector from each of your ⊕s to the VP it was scored against.
 Run it: `python3 -m http.server 8080` in this folder. No build step, no dependencies.
 
 Part of [Art Daily](https://artdaily.sadeali.com/) · a [sadeali.com](https://sadeali.com/) experiment
+
+## What changed in the input-fairness pass
+
+Scene 1 is scored gently and tightens by scene 3 — before this the
+geometry ramped while the bands did not, so difficulty compounded twice.
+Both bands carry an absolute pixel floor (a phone was being held to half
+a desktop's tolerance) and are eased per hardware. In trace mode the
+near-parallel guard moved from 3° to 11.5° and says why a pair was
+refused, the first and last tenth of a stroke are dropped before fitting
+(every mouse drag has an acceleration hook), the minimum stroke is
+longer, and the line you are drawing is extended live so you can steer
+it. "VPs" and "the accent" are gone from player-facing copy.
+
+## Input fairness
+
+Scores are only ever compared against your own history, so the drill
+eases its tolerances for the hardware in your hand and says which one it
+eased for (the "scoring for…" chip in the HUD). A pen keeps the strict
+reference; a mouse or trackpad, which pivots at the wrist and cannot
+creep, gets roughly double the room; a finger sits between. Start and
+grab zones move the other way — a screenless tablet needs the *biggest*
+targets, because the hand is out of sight. Relative tolerances carry an
+absolute pixel floor so a phone is never held to a stricter standard
+than a desktop for the same drill.
+

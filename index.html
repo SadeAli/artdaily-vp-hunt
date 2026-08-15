@@ -4,16 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vanishing Point Hunt — Art Daily</title>
-<meta name="description" content="find the VPs and horizon in the scene — a daily art drill from artdaily.sadeali.com">
+<meta name="description" content="find the vanishing points and eye level in the scene — a daily art drill from artdaily.sadeali.com">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Vanishing Point Hunt">
-<meta property="og:description" content="find the VPs and horizon in the scene — a daily art drill">
+<meta property="og:description" content="find the vanishing points and eye level in the scene — a daily art drill">
 <meta property="og:site_name" content="Art Daily · SadeAli">
 <meta property="og:url" content="https://sadeali.github.io/artdaily-vp-hunt/">
 <link rel="canonical" href="https://sadeali.github.io/artdaily-vp-hunt/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Vanishing Point Hunt">
-<meta name="twitter:description" content="find the VPs and horizon in the scene — a daily art drill">
+<meta name="twitter:description" content="find the vanishing points and eye level in the scene — a daily art drill">
 <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'&gt;&lt;text y='.9em' font-size='90'&gt;🔭&lt;/text&gt;&lt;/svg&gt;">
 <link rel="stylesheet" href="css/style.css">
 <script>
@@ -37,12 +37,13 @@
       <div class="game-hud">
         <div class="game-id">
           <h1 class="game-name"><span class="game-emoji" aria-hidden="true">🔭</span> Vanishing Point Hunt</h1>
-          <p class="game-tagline">find the VPs and horizon in the scene</p>
+          <p class="game-tagline">find the vanishing points and the eye level</p>
         </div>
         <dl class="hud-stats">
           <div class="hud-stat"><dt>round</dt><dd id="hudRound">–</dd></div>
           <div class="hud-stat"><dt>score</dt><dd id="hudScore">–</dd></div>
           <div class="hud-stat"><dt>best</dt><dd id="hudBest">–</dd></div>
+                <div class="hud-stat hud-input"><dd id="inputMode" hidden></dd></div>
         </dl>
       </div>
 
@@ -61,11 +62,11 @@
       </div>
       <div class="howto" id="howTo" hidden>
         <p class="howto-cmd" aria-hidden="true"><span class="prompt">$</span> man vp-hunt</p>
-        <p>A little city photographed through a real lens: one horizon, two vanishing points. Drag the dashed guide onto the hidden horizon and park a ⊕ marker on each VP, then lock it in — three scenes per round. The ⊕s ride the line, because in two-point perspective both VPs sit <b>on</b> the horizon: slide a ⊕ sideways to move that VP, pull it up or down and the whole horizon comes along.</p>
-        <p>Rather work like you would at the easel? Press <b>trace edges</b> and draw along two receding edges of the same wall — where your two strokes cross <i>is</i> that vanishing point. Two strokes per VP, and the horizon comes free. Undo pops the last stroke; nothing you draw costs points.</p>
+        <p>A little city photographed through a real lens. A <b>vanishing point</b> is where a set of parallel edges — the long sides of a box running away from you — appear to meet in the distance. This view has two of them, one for each direction the boxes face. The <b>horizon</b> is the same thing as the camera's eye level: the height the lens is at. Drag the dashed guide onto the hidden eye level and park a ⊕ marker on each vanishing point, then lock it in — three scenes per round. The ⊕s ride the line, because both vanishing points always sit <b>on</b> the eye level: slide a ⊕ sideways to move it, pull it up or down and the whole line comes along.</p>
+        <p>Rather work like you would at the easel? Press <b>trace edges</b> and drag along two edges of the same wall that run away from you — where your two strokes cross <i>is</i> that vanishing point. The line you are drawing is extended right across the sheet as you go, so you can steer it. Two strokes per point, and the eye level comes free. Undo pops the last stroke; nothing you draw costs points. Pick edges that are clearly different in angle: two that nearly agree cross somewhere meaningless, and the drill will say so rather than write a bad answer into your guess.</p>
         <p>Keys: ← → slide the selected ⊕, ↑ ↓ raise and lower the horizon, shift for fine steps, space swaps ⊕, enter locks in.</p>
-        <p>Scoring: horizon placement is 40%, each vanishing point 30%. Full credit inside a small bullseye (about 2% of the frame), fading to zero at 12% of the height for the horizon and 15% of the width for a VP.</p>
-        <p>Studio tip: pick two edges of the same wall and extend them — where they kiss is the VP, and the horizon runs level through it.</p>
+        <p>Scoring: eye-level placement is 40%, each vanishing point 30%. Full credit inside a small bullseye, fading to zero further out. The bullseye never shrinks below a real number of pixels — so a phone is not held to a stricter standard than a desktop for the same drill — it is a little wider on a mouse or trackpad than on a pen, and scene 1 is scored gently while the words are still new.</p>
+        <p>Studio tip: pick two edges of the same wall and extend them — where they kiss is the vanishing point, and the eye level runs flat through it.</p>
       </div>
 
       <noscript><p class="hint">This drill needs JavaScript — nothing else, no trackers, no accounts.</p></noscript>
