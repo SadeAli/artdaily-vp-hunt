@@ -1,46 +1,71 @@
 /* ============================================================
-   game.js — Vanishing Point Hunt. Each round shows three
-   procedurally built two-point-perspective city scenes. The
-   scene is rendered from KNOWN geometry (hidden horizon + two
-   on-canvas VPs), so scoring is exact: drag the dashed guide
-   onto the horizon, slide a ⊕ marker onto each VP, lock it in.
-   The reveal overlays the true horizon, both VPs and every
-   construction edge extended to them, in the game accent.
+   game.js — Vanishing Point Hunt. Each round shows three city
+   scenes photographed by a REAL camera: a level pinhole with a
+   sampled focal length, principal point and yaw, boxes built as
+   solid 3D blocks on the ground plane, every vertex divided by its
+   own depth. The two vanishing points are then the projections of
+   the two horizontal directions — (vpL−P)·(vpR−P) = −f² holds by
+   construction, so every scene is a city a real lens could have
+   seen, and the ground truth for scoring is exact.
+
+   Two ways to hunt: drag the dashed guide onto the horizon and a ⊕
+   onto each VP, or press "trace edges" and do it the way you would
+   at the easel — draw along two receding edges of the same wall and
+   where your strokes cross IS the vanishing point.
+
    Scene geometry is stored in normalized 0–1 coords so resizes
-   never change the puzzle. Scoring lives in pure functions at
-   the top — inputs in, 0–100 out.
+   never change the puzzle. Scoring lives in pure functions at the
+   top — inputs in, 0–100 out.
    ============================================================ */
 (function () {
   'use strict';
 
   var SLUG = 'vp-hunt';
   var SCENES_PER_ROUND = 3;
+  var ASPECT = 0.62;          /* canvas height ÷ canvas width */
+  var LOCK_MS = 350;          /* a double-tap must never skip a reveal */
 
   /* ============ pure scoring (px in, 0–100 out) ============ */
+
+  /* Full credit inside a small bullseye, nothing past the outer ring —
+     both as fractions of the canvas. The plateau is what makes 100
+     earnable: sub-pixel luck should not decide 100 vs 97. */
+  var H_FULL = 0.015, H_ZERO = 0.12;   /* fractions of canvas height */
+  var V_FULL = 0.02, V_ZERO = 0.15;    /* fractions of canvas width  */
 
   function clampRange(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
   function clamp01(v) { return clampRange(v, 0, 1); }
 
-  /* Full marks on the line, zero at 12% of canvas height away.
-     Degenerate input (zero/NaN size or coords) scores 0, never NaN. */
-  function horizonScore(guessY, trueY, H) {
-    if (!isFinite(guessY) || !isFinite(trueY) || !(H > 0)) return 0;
-    return 100 * clamp01(1 - Math.abs(guessY - trueY) / (0.12 * H));
+  function bandScore(dist, full, zero) {
+    if (!isFinite(dist)) return 0;
+    return 100 * clamp01((zero - dist) / (zero - full));
   }
 
-  /* Full marks on the point, zero at 15% of canvas width away.
-     Degenerate input (zero/NaN size or coords) scores 0, never NaN. */
+  /* Full marks within H_FULL of the line, zero at H_ZERO of the canvas
+     height away. Degenerate input (zero/NaN size or coords) scores 0,
+     never NaN. */
+  function horizonScore(guessY, trueY, H) {
+    if (!isFinite(guessY) || !isFinite(trueY) || !(H > 0)) return 0;
+    return bandScore(Math.abs(guessY - trueY) / H, H_FULL, H_ZERO);
+  }
+
+  /* Full marks within V_FULL of the point, zero at V_ZERO of the canvas
+     width away. */
   function vpScore(gx, gy, tx, ty, W) {
     if (!isFinite(gx) || !isFinite(gy) || !isFinite(tx) || !isFinite(ty) || !(W > 0)) return 0;
-    return 100 * clamp01(1 - Math.hypot(gx - tx, gy - ty) / (0.15 * W));
+    return bandScore(Math.hypot(gx - tx, gy - ty) / W, V_FULL, V_ZERO);
   }
 
   /* Match each guess to a distinct true VP — never both to the same
-     one. Of the two possible pairings, the better-scoring one wins. */
-  function vpPairScores(g1, g2, t1, t2, W) {
+     one. Of the two possible pairings, the better-scoring one wins;
+     `swapped` says the left ⊕ was read against the right VP, so the
+     reveal can draw honest connectors. */
+  function vpPairing(g1, g2, t1, t2, W) {
     var a = [vpScore(g1.x, g1.y, t1.x, t1.y, W), vpScore(g2.x, g2.y, t2.x, t2.y, W)];
     var b = [vpScore(g1.x, g1.y, t2.x, t2.y, W), vpScore(g2.x, g2.y, t1.x, t1.y, W)];
-    return (a[0] + a[1] >= b[0] + b[1]) ? a : b;
+    return (a[0] + a[1] >= b[0] + b[1])
+      ? { scores: a, swapped: false }
+      : { scores: b, swapped: true };
   }
 
   function sceneScore(h, v1, v2) { return 0.4 * h + 0.3 * v1 + 0.3 * v2; }
@@ -49,6 +74,49 @@
     var sum = 0, i;
     for (i = 0; i < scores.length; i++) sum += scores[i];
     return scores.length ? sum / scores.length : 0;
+  }
+
+  /* ---- stroke geometry: a traced edge becomes an infinite line ----
+     Total-least-squares fit (the dominant eigenvector of the 2×2
+     scatter matrix), so a stroke drawn steeply is fitted as fairly as
+     a flat one. Returns null for anything too short to mean an edge —
+     a stray tap must cost nothing. */
+  function fitStrokeLine(pts, minLen) {
+    var n = pts.length, i, sx = 0, sy = 0, dx, dy;
+    if (n < 2) return null;
+    for (i = 0; i < n; i++) { sx += pts[i].x; sy += pts[i].y; }
+    var mx = sx / n, my = sy / n;
+    var sxx = 0, syy = 0, sxy = 0;
+    for (i = 0; i < n; i++) {
+      dx = pts[i].x - mx; dy = pts[i].y - my;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    if (!isFinite(sxx) || !isFinite(syy) || !isFinite(sxy)) return null;
+    var th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    var ux = Math.cos(th), uy = Math.sin(th);
+    var lo = Infinity, hi = -Infinity, t;
+    for (i = 0; i < n; i++) {
+      t = (pts[i].x - mx) * ux + (pts[i].y - my) * uy;
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    }
+    if (!(hi - lo >= minLen)) return null;
+    return {
+      x: mx, y: my, ux: ux, uy: uy, len: hi - lo,
+      a: { x: mx + ux * lo, y: my + uy * lo },
+      b: { x: mx + ux * hi, y: my + uy * hi },
+    };
+  }
+
+  /* Where two fitted edges cross — null when they are too near
+     parallel for the crossing to mean anything (|sin θ| < 0.05 ≈ 3°). */
+  function intersectFits(l1, l2) {
+    if (!l1 || !l2) return null;
+    var d = l1.ux * l2.uy - l1.uy * l2.ux;
+    if (!isFinite(d) || Math.abs(d) < 0.05) return null;
+    var t = ((l2.x - l1.x) * l2.uy - (l2.y - l1.y) * l2.ux) / d;
+    if (!isFinite(t)) return null;
+    return { x: l1.x + l1.ux * t, y: l1.y + l1.uy * t };
   }
 
   /* ============ chrome refs + SDK ============ */
@@ -61,6 +129,7 @@
   var hudScore = document.getElementById('hudScore');
   var hudBest = document.getElementById('hudBest');
   var btnLock = document.getElementById('btnLock');
+  var btnTrace = document.getElementById('btnTrace');
 
   ArtDaily.init({ slug: SLUG });
 
@@ -71,8 +140,30 @@
       ink: cs.getPropertyValue('--ink').trim(),
       muted: cs.getPropertyValue('--muted').trim(),
       card: cs.getPropertyValue('--card').trim(),
+      line: cs.getPropertyValue('--line').trim(),
       accent: cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--sky').trim(),
     };
+  }
+
+  function hexRgb(hex) {
+    var m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return null;
+    var n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function mixColor(f, t, k) {
+    return 'rgb(' + Math.round(f[0] + (t[0] - f[0]) * k) + ',' +
+      Math.round(f[1] + (t[1] - f[1]) * k) + ',' +
+      Math.round(f[2] + (t[2] - f[2]) * k) + ')';
+  }
+
+  /* --muted alone sits just under 4.5:1 on the paper card, so anything
+     meaning-bearing (the player's own guide, the score stamp) gets inked
+     toward graphite until it clears AA on both sheets. */
+  function readable(c) {
+    var m = hexRgb(c.muted), i = hexRgb(c.ink);
+    return (m && i) ? mixColor(m, i, 0.45) : c.ink;
   }
 
   /* ---- crisp canvas at any devicePixelRatio; height tracks width ---- */
@@ -80,7 +171,7 @@
   function fitCanvas() {
     var rect = canvas.getBoundingClientRect();
     W = Math.max(1, Math.round(rect.width));
-    H = Math.round(W * 0.62);
+    H = Math.round(W * ASPECT);
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
@@ -88,94 +179,165 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  /* ============ scene generation (normalized 0–1 coords) ============ */
+  /* ============================================================
+     scene generation — a real level pinhole camera
+
+     Eye at the origin, optical axis down +Z, world Y up, no roll and
+     no tilt: verticals stay vertical and the horizon is exactly the
+     row through the principal point. Image coords are in units of the
+     canvas WIDTH (u across, v down):
+
+         u = pu + f·X/Z          v = pv − f·Y/Z
+
+     Two perpendicular horizontal directions
+         A = ( cos φ, 0, sin φ)   →  vpR = pu + f·cot φ
+         B = (−sin φ, 0, cos φ)   →  vpL = pu − f·tan φ
+     give (vpR − pu)(vpL − pu) = −f². Sampling f and φ FIRST — instead
+     of dropping two VPs on a line and hoping — is what guarantees a
+     plausible focal length exists for every scene.
+
+     Eye height is the unit, so a base sitting δ below the horizon is
+     at depth Z = f/δ, and a top τ above it is 1 + τ/δ eye heights
+     tall. That is the artist's eye-level rule, enforced by geometry.
+     ============================================================ */
+
+  var VP_EDGE = 0.05;               /* keep VPs this far inside the frame */
+  var VP_CORE = 0.20;               /* …and this far off the optical axis */
+  var MIN_FACE = 0.015;             /* no visible face thinner than this */
 
   function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
   function lerp(a, b, t) { return a + (b - a) * t; }
-  function lerpP(p, q, t) { return { x: lerp(p.x, q.x, t), y: lerp(p.y, q.y, t) }; }
 
-  /* Intersection of infinite lines p1→p2 and p3→p4 (null if parallel). */
-  function lineIntersect(p1, p2, p3, p4) {
-    var d = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x);
-    if (Math.abs(d) < 1e-9) return null;
-    var a = p1.x * p2.y - p1.y * p2.x;
-    var b = p3.x * p4.y - p3.y * p4.x;
+  /* Difficulty ramp within a round. `t` slides the camera's yaw across
+     the whole legal window: 0.5 is a balanced two-point view, the ends
+     push one VP out to the frame edge. base/top are the image offsets
+     of a block's base below and roof above the horizon (canvas widths),
+     depth is how far along the way to a VP a face runs. */
+  var DIFF = [
+    { boxes: 3, f: [0.30, 0.38], t: [0.36, 0.64], base: [0.13, 0.26], top: [0.18, 0.34], depth: [0.30, 0.46], low: 0.2, lw: 2 },
+    { boxes: 4, f: [0.28, 0.36], t: [0.18, 0.82], base: [0.09, 0.18], top: [0.11, 0.22], depth: [0.18, 0.32], low: 0.25, lw: 1.7 },
+    { boxes: 5, f: [0.26, 0.34], t: [0.02, 0.14], base: [0.05, 0.12], top: [0.06, 0.14], depth: [0.09, 0.18], low: 0.3, lw: 1.4, edge: true },
+  ];
+
+  /* Camera whose two VPs are both on the sheet, both clear of the
+     optical axis, and derived from a single real (f, φ). */
+  function makeCamera(d) {
+    var pu = rand(0.44, 0.56);
+    var pv = rand(0.26, 0.58) * ASPECT;
+    var f, dLmin, dLmax, guard = 0;
+    do {
+      f = rand(d.f[0], d.f[1]);
+      dLmin = Math.max(VP_CORE, f * f / (1 - VP_EDGE - pu));
+      dLmax = Math.min(pu - VP_EDGE, f * f / VP_CORE);
+    } while (dLmin > dLmax && guard++ < 24);
+    if (dLmin > dLmax) { dLmin = dLmax = (dLmin + dLmax) / 2; }
+    var t = d.t[0] + Math.random() * (d.t[1] - d.t[0]);
+    if (d.edge && Math.random() < 0.5) t = 1 - t;   /* mirror the hard scene */
+    var dL = lerp(dLmin, dLmax, t);
+    var dR = f * f / dL;
     return {
-      x: (a * (p3.x - p4.x) - (p1.x - p2.x) * b) / d,
-      y: (a * (p3.y - p4.y) - (p1.y - p2.y) * b) / d,
+      f: f, pu: pu, pv: pv,
+      phi: Math.atan2(dL, f),        /* tan φ = dL / f */
+      vpL: pu - dL, vpR: pu + dR,
     };
   }
 
-  /* Ramp within the round: scene 1 = few big boxes, long strong
-     edges; scene 3 = many small boxes, short edges, one VP hugging
-     the frame. base/hgt are offsets from the horizon, depth is the
-     fraction of the way to a VP a face extends. */
-  var DIFF = [
-    { boxes: 3, vpL: [0.12, 0.28], vpR: [0.72, 0.88], base: [0.16, 0.32], hgt: [0.26, 0.52], depth: [0.30, 0.46], edge: false, lw: 2 },
-    { boxes: 4, vpL: [0.07, 0.30], vpR: [0.70, 0.93], base: [0.10, 0.26], hgt: [0.15, 0.32], depth: [0.18, 0.32], edge: false, lw: 1.7 },
-    { boxes: 5, vpL: [0.16, 0.42], vpR: [0.58, 0.86], base: [0.05, 0.16], hgt: [0.08, 0.18], depth: [0.09, 0.18], edge: true,  lw: 1.4 },
-  ];
+  /* world → image, in canvas-width units */
+  function projectW(cam, X, Y, Z) {
+    return { u: cam.pu + cam.f * X / Z, v: cam.pv - cam.f * Y / Z };
+  }
 
-  function makeBox(d, vpL, vpR, slot) {
-    var x0 = lerp(vpL.x, vpR.x, slot);
-    var yB = Math.min(0.94, vpL.y + rand(d.base[0], d.base[1]));
-    var yT = Math.max(0.05, yB - rand(d.hgt[0], d.hgt[1]));
-    var nT = { x: x0, y: yT }, nB = { x: x0, y: yB };
-    /* keep every face at least ~2.5% of the width wide so small
-       scene-3 boxes never degenerate into slivers */
-    var tL = rand(d.depth[0], d.depth[1]);
-    var tR = rand(d.depth[0], d.depth[1]);
-    tL = Math.max(tL, Math.min(0.4, 0.025 / Math.max(0.01, Math.abs(vpL.x - x0))));
-    tR = Math.max(tR, Math.min(0.4, 0.025 / Math.max(0.01, Math.abs(vpR.x - x0))));
-    var lT = lerpP(nT, vpL, tL), lB = lerpP(nB, vpL, tL);
-    var rT = lerpP(nT, vpR, tR), rB = lerpP(nB, vpR, tR);
-    var back = lineIntersect(lT, vpR, rT, vpL);
+  /* image units → stored normalized coords (x over W, y over H) */
+  function store(p) { return { x: p.u, y: p.v / ASPECT }; }
 
-    /* facade lines: window rows converge to the VPs, mullions stay
-       vertical — subtle extra clues */
-    var facade = [], i, f, a;
-    var nRows = 2 + Math.floor(rand(0, 3));
-    for (i = 1; i <= nRows; i++) {
-      a = { x: x0, y: lerp(yT, yB, i / (nRows + 1)) };
-      facade.push({ a: a, b: lerpP(a, vpL, tL) });
-      facade.push({ a: a, b: lerpP(a, vpR, tR) });
+  function makeBox(cam, d, slot) {
+    var sinP = Math.sin(cam.phi), cosP = Math.cos(cam.phi);
+    var u0 = lerp(cam.vpL, cam.vpR, slot);
+
+    /* base below the horizon → depth; roof above it → height. Both are
+       clamped so the block stays on the sheet whatever the horizon. */
+    var delHi = Math.min(d.base[1], ASPECT - 0.03 - cam.pv);
+    var delLo = Math.min(d.base[0], delHi - 0.015);
+    var del = rand(delLo, delHi);
+    var tau;
+    if (Math.random() < d.low) {
+      tau = -rand(0.15, 0.5) * del;                 /* shorter than the eye */
+    } else {
+      var tauHi = Math.min(d.top[1], cam.pv - 0.03);
+      var tauLo = Math.min(d.top[0], tauHi - 0.02);
+      tau = rand(tauLo, tauHi);
     }
-    var nCols = 1 + Math.floor(rand(0, 2));
+
+    var Z = cam.f / del;                            /* eye height = 1 unit */
+    var X = (u0 - cam.pu) * Z / cam.f;
+    var hgt = 1 + tau / del;                        /* in eye heights */
+
+    /* Face widths are sampled as image fractions of the way to their VP
+       (t = a·sinφ/(Z + a·sinφ) for the A face) and converted back to
+       world extents, so the tuned look survives the 3D rebuild. The
+       floor keeps small blocks from degenerating into slivers. */
+    var tA = rand(d.depth[0], d.depth[1]);
+    var tB = rand(d.depth[0], d.depth[1]);
+    tA = Math.max(tA, Math.min(0.5, MIN_FACE / Math.max(0.02, cam.vpR - u0)));
+    tB = Math.max(tB, Math.min(0.5, MIN_FACE / Math.max(0.02, u0 - cam.vpL)));
+    var a = Z * tA / ((1 - tA) * sinP);
+    var b = Z * tB / ((1 - tB) * cosP);
+
+    /* eight real corners: P is the near vertical edge, +a runs to the
+       right VP, +b to the left VP, both away from the eye */
+    var yB = -1, yT = -1 + hgt;
+    function corner(ka, kb, y) {
+      return projectW(cam,
+        X + ka * a * cosP - kb * b * sinP,
+        y,
+        Z + ka * a * sinP + kb * b * cosP);
+    }
+
+    /* facade: window rows converge to the VPs, mullions stay vertical —
+       real 3D lines, so the clues they give are exact */
+    var facade = [], i, k, nRows = 2 + Math.floor(rand(0, 3)), nCols = 1 + Math.floor(rand(0, 2));
+    for (i = 1; i <= nRows; i++) {
+      k = lerp(yB, yT, i / (nRows + 1));
+      facade.push({ a: store(corner(0, 0, k)), b: store(corner(1, 0, k)) });
+      facade.push({ a: store(corner(0, 0, k)), b: store(corner(0, 1, k)) });
+    }
     for (i = 1; i <= nCols; i++) {
-      f = tL * i / (nCols + 1);
-      facade.push({ a: lerpP(nT, vpL, f), b: lerpP(nB, vpL, f) });
-      f = tR * i / (nCols + 1);
-      facade.push({ a: lerpP(nT, vpR, f), b: lerpP(nB, vpR, f) });
+      k = i / (nCols + 1);
+      facade.push({ a: store(corner(k, 0, yT)), b: store(corner(k, 0, yB)) });
+      facade.push({ a: store(corner(0, k, yT)), b: store(corner(0, k, yB)) });
     }
 
     return {
-      nT: nT, nB: nB, lT: lT, lB: lB, rT: rT, rB: rB, back: back,
-      hasTop: yT > vpL.y, facade: facade,
+      nT: store(corner(0, 0, yT)), nB: store(corner(0, 0, yB)),
+      rT: store(corner(1, 0, yT)), rB: store(corner(1, 0, yB)),
+      lT: store(corner(0, 1, yT)), lB: store(corner(0, 1, yB)),
+      back: store(corner(1, 1, yT)),
+      hasTop: hgt < 1,          /* roof visible only below eye level */
+      facade: facade,
+      depth: Z,
     };
   }
 
   function makeScene(diffIdx) {
     var d = DIFF[diffIdx];
-    var ty = rand(0.26, 0.58);
-    var lx, rx;
-    if (d.edge) {
-      /* one VP near the frame edge (still on-canvas, middle 90%) */
-      if (Math.random() < 0.5) { lx = rand(0.05, 0.09); rx = rand(0.55, 0.82); }
-      else { rx = rand(0.91, 0.95); lx = rand(0.18, 0.45); }
-    } else {
-      lx = rand(d.vpL[0], d.vpL[1]);
-      rx = rand(d.vpR[0], d.vpR[1]);
-    }
-    var L = { x: lx, y: ty }, R = { x: rx, y: ty };
+    var cam = makeCamera(d);
     var boxes = [], i, s0, s1;
     for (i = 0; i < d.boxes; i++) {
       s0 = 0.26 + 0.48 * (i / d.boxes);
       s1 = 0.26 + 0.48 * ((i + 1) / d.boxes);
-      boxes.push(makeBox(d, L, R, rand(s0 + 0.02, s1 - 0.02)));
+      boxes.push(makeBox(cam, d, rand(s0 + 0.02, s1 - 0.02)));
     }
-    /* far buildings (bases nearer the horizon) paint first */
-    boxes.sort(function (a, b) { return a.nB.y - b.nB.y; });
-    return { ty: ty, vpL: L, vpR: R, boxes: boxes, lw: d.lw, sunLeft: Math.random() < 0.5 };
+    /* painter's algorithm: far blocks first, so near ones occlude */
+    boxes.sort(function (p, q) { return q.depth - p.depth; });
+    return {
+      ty: cam.pv / ASPECT,
+      vpL: { x: cam.vpL, y: cam.pv / ASPECT },
+      vpR: { x: cam.vpR, y: cam.pv / ASPECT },
+      boxes: boxes, lw: d.lw, sunLeft: Math.random() < 0.5,
+      /* the camera that took the photograph, kept so the scene can be
+         checked against (vpL−pu)(vpR−pu) = −f² */
+      f: cam.f, pu: cam.pu,
+    };
   }
 
   /* ============ round state ============ */
@@ -183,16 +345,55 @@
   var round = 0, sceneIdx = 0, sceneScores = [], scene = null;
   var phase = 'idle'; /* 'guess' → 'reveal' (per scene) → 'done' */
   var guess = { y: 0.8, v1: 0.3, v2: 0.7 };
-  var selMarker = 1; /* keyboard-selected ⊕ */
+  var selMarker = 1;  /* keyboard-selected ⊕ */
+  var lastPair = null, lastParts = null;
+  var lastFlip = 0;   /* time of the last phase change */
+
+  /* traced-edge mode */
+  var mode = 'drag';  /* 'drag' | 'trace' */
+  var strokes = [];   /* fitted edges { a, b }, normalized — 2 per VP */
+  var traceVP = [];   /* the crossings, normalized */
+  var rawPts = null;  /* the stroke under the finger, in px */
+
+  var TRACE_PROMPT = [
+    'trace an edge that recedes to the LEFT — drag along it (1 of 2).',
+    'now a second LEFT-going edge, at a different height (2 of 2).',
+    'good — now an edge that recedes to the RIGHT (1 of 2).',
+    'one more RIGHT-going edge (2 of 2).',
+  ];
+
+  function guessHint() {
+    return 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND +
+      ' — drag the dashed guide onto the horizon and a ⊕ onto each vanishing point. ' +
+      'the ⊕s ride the line: pull one up or down and the horizon comes with it.';
+  }
+
+  function setTraceButton() {
+    if (mode !== 'trace') {
+      btnTrace.textContent = 'trace edges ✎';
+      btnTrace.setAttribute('aria-pressed', 'false');
+    } else {
+      btnTrace.textContent = strokes.length ? 'undo stroke ↺' : 'stop tracing ✕';
+      btnTrace.setAttribute('aria-pressed', 'true');
+    }
+    btnTrace.disabled = (phase !== 'guess');
+  }
 
   function startScene() {
     scene = makeScene(sceneIdx);
     guess = { y: 0.8, v1: 0.3, v2: 0.7 };
-    drag = null; /* a pointer held across scenes must not move the fresh guess */
+    drag = null;    /* a pointer held across scenes must not move the fresh guess */
+    rawPts = null;
+    strokes = [];
+    traceVP = [];
+    mode = 'drag';
+    lastPair = null;
+    lastParts = null;
     phase = 'guess';
     btnLock.textContent = 'lock it in';
-    hint.textContent = 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND +
-      ' — drag the dashed guide onto the horizon, a ⊕ onto each vanishing point.';
+    btnLock.disabled = false;
+    setTraceButton();
+    hint.textContent = guessHint();
     draw();
   }
 
@@ -200,10 +401,29 @@
     round += 1;
     sceneIdx = 0;
     sceneScores = [];
+    lastFlip = 0;
     hudRound.textContent = String(round);
     hudScore.textContent = '–';
-    btnLock.disabled = false;
     startScene();
+  }
+
+  /* Abandoning a half-finished round throws away every scene locked so
+     far (an unfinished round is never reported), so a stray tap on "new
+     round" has to ask first. Once the third scene locks the round is
+     already in the books — no question then, the button just deals
+     another one. */
+  var abandonArmed = false, abandonTimer = null;
+  function requestNewRound() {
+    if (sceneScores.length && sceneScores.length < SCENES_PER_ROUND && !abandonArmed) {
+      abandonArmed = true;
+      showToast('press again to drop this round', false);
+      clearTimeout(abandonTimer);
+      abandonTimer = setTimeout(function () { abandonArmed = false; }, 4000);
+      return;
+    }
+    clearTimeout(abandonTimer);
+    abandonArmed = false;
+    newRound();
   }
 
   function lockScene() {
@@ -212,32 +432,45 @@
     var t1 = { x: scene.vpL.x * W, y: scene.vpL.y * H };
     var t2 = { x: scene.vpR.x * W, y: scene.vpR.y * H };
     var h = horizonScore(guess.y * H, scene.ty * H, H);
-    var v = vpPairScores(g1, g2, t1, t2, W);
-    var s = sceneScore(h, v[0], v[1]);
+    var pair = vpPairing(g1, g2, t1, t2, W);
+    var s = sceneScore(h, pair.scores[0], pair.scores[1]);
     sceneScores.push(s);
+    lastPair = pair;
+    lastParts = { total: s, h: h, v: pair.scores };
+    mode = 'drag';
+    rawPts = null;
     phase = 'reveal';
-    hint.textContent = 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND + ' — ' +
-      Math.round(s) + '/100 (horizon ' + Math.round(h) +
-      ' · vps ' + Math.round(v[0]) + ', ' + Math.round(v[1]) + ')';
-    btnLock.textContent = (sceneIdx < SCENES_PER_ROUND - 1) ? 'next scene →' : 'finish round';
+    hint.textContent = 'scene ' + (sceneIdx + 1) + ' — ' + Math.round(s) + '/100 ' +
+      '(horizon ' + Math.round(h) + ' · vps ' + Math.round(pair.scores[0]) + ', ' +
+      Math.round(pair.scores[1]) + '). the accent lines are the truth.';
+    hudScore.textContent = String(Math.round(roundScore(sceneScores)));
+    var isLast = sceneIdx === SCENES_PER_ROUND - 1;
+    btnLock.textContent = isLast ? 'finish round' : 'next scene →';
+    setTraceButton();
+    /* The round is complete the moment the third scene locks — report
+       right here, exactly once, so pressing "new round" during the last
+       reveal can never drop a finished round's score. */
+    if (isLast) reportRound();
+    else showToast('scene ' + (sceneIdx + 1) + ': ' + Math.round(s) + ' / 100', false);
     draw();
+  }
+
+  function reportRound() {
+    var res = ArtDaily.report(roundScore(sceneScores));
+    hudScore.textContent = String(res.score);
+    hudBest.textContent = res.best === null ? '–' : String(res.best);
+    showToast((res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
   }
 
   function advance() {
     sceneIdx += 1;
     if (sceneIdx < SCENES_PER_ROUND) { startScene(); return; }
-    finishRound();
-  }
-
-  function finishRound() {
     phase = 'done';
     btnLock.disabled = true;
     btnLock.textContent = 'locked';
-    var res = ArtDaily.report(roundScore(sceneScores));
-    hudScore.textContent = String(res.score);
-    hudBest.textContent = res.best === null ? '–' : String(res.best);
+    setTraceButton();
     hint.textContent = 'round done — press “new round” to hunt again.';
-    showToast((res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
+    draw();
   }
 
   /* ============ painting ============ */
@@ -293,7 +526,7 @@
       aR = scene.sunLeft ? 0.15 : 0.07;
       face([b.nT, b.lT, b.lB, b.nB], c, aL);
       face([b.nT, b.rT, b.rB, b.nB], c, aR);
-      if (b.hasTop && b.back) face([b.nT, b.lT, b.back, b.rT], c, 0.04);
+      if (b.hasTop) face([b.nT, b.lT, b.back, b.rT], c, 0.04);
 
       ctx.strokeStyle = c.ink;
       ctx.globalAlpha = 0.18;
@@ -307,7 +540,7 @@
       seg(b.rT, b.rB);
       seg(b.nT, b.lT); seg(b.nB, b.lB);
       seg(b.nT, b.rT); seg(b.nB, b.rB);
-      if (b.hasTop && b.back) { seg(b.lT, b.back); seg(b.rT, b.back); }
+      if (b.hasTop) { seg(b.lT, b.back); seg(b.rT, b.back); }
     }
   }
 
@@ -315,7 +548,7 @@
     ctx.beginPath();
     ctx.arc(x, y, 13, 0, Math.PI * 2);
     if (!faded) { ctx.fillStyle = c.card; ctx.fill(); }
-    ctx.strokeStyle = faded ? c.muted : c.ink;
+    ctx.strokeStyle = faded ? readable(c) : c.ink;
     ctx.lineWidth = faded ? 1.5 : 2;
     ctx.stroke();
     ctx.beginPath();
@@ -323,7 +556,7 @@
     ctx.moveTo(x, y - 8); ctx.lineTo(x, y + 8);
     ctx.stroke();
     if (selected && !faded) {
-      ctx.strokeStyle = c.muted;
+      ctx.strokeStyle = readable(c);
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -337,7 +570,7 @@
     var gy = guess.y * H;
     ctx.save();
     ctx.globalAlpha = faded ? 0.55 : 1;
-    ctx.strokeStyle = c.muted;
+    ctx.strokeStyle = readable(c);
     ctx.lineWidth = faded ? 1.5 : 2;
     ctx.setLineDash([9, 7]);
     ctx.beginPath();
@@ -345,13 +578,81 @@
     ctx.lineTo(W, gy);
     ctx.stroke();
     ctx.setLineDash([]);
-    drawMarker(c, guess.v1 * W, gy, selMarker === 1, faded);
-    drawMarker(c, guess.v2 * W, gy, selMarker === 2, faded);
+    drawMarker(c, guess.v1 * W, gy, selMarker === 1 && mode === 'drag', faded);
+    drawMarker(c, guess.v2 * W, gy, selMarker === 2 && mode === 'drag', faded);
     ctx.restore();
   }
 
+  /* the player's own construction: the stroke as drawn, plus the line
+     it implies, run right across the sheet — the whole point of the
+     easel habit is seeing the edge extended */
+  function drawStrokes(c) {
+    var i, s, a, b, dx, dy, k;
+    ctx.save();
+    for (i = 0; i < strokes.length; i++) {
+      s = strokes[i];
+      a = px(s.a); b = px(s.b);
+      dx = b.x - a.x; dy = b.y - a.y;
+      k = 4000 / Math.max(1e-6, Math.hypot(dx, dy));
+      ctx.strokeStyle = readable(c);
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(a.x - dx * k, a.y - dy * k);
+      ctx.lineTo(b.x + dx * k, b.y + dy * k);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = c.ink;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    if (rawPts && rawPts.length > 1) {
+      ctx.globalAlpha = 0.75;
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = c.ink;
+      ctx.beginPath();
+      ctx.moveTo(rawPts[0].x, rawPts[0].y);
+      for (i = 1; i < rawPts.length; i++) ctx.lineTo(rawPts[i].x, rawPts[i].y);
+      ctx.stroke();
+    }
+    for (i = 0; i < traceVP.length; i++) {
+      a = px(traceVP[i]);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = c.ink;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* Accent on the bare card is 3.5:1 — fine — but the reveal's lines run
+     right across the blocks' shaded faces, where the same accent drops
+     near 2:1. Anything the reveal actually MEANS is therefore stroked
+     twice: a fat card halo first, the accent on top, so the line reads
+     against card wherever it lands, on paper and at night alike.
+     Stroking leaves the path intact, so the two passes line up exactly —
+     dashes and all. (The faint construction rays are decoration and keep
+     their single hairline.) */
+  function truthStroke(c, halo, w) {
+    ctx.strokeStyle = c.card;
+    ctx.lineWidth = halo;
+    ctx.stroke();
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = w;
+    ctx.stroke();
+  }
+
   function drawReveal(c) {
-    var i, b, vp;
+    var i, b, vp, gy = guess.y * H, hy = scene.ty * H;
     ctx.save();
     /* construction edges extended to their VPs */
     ctx.strokeStyle = c.accent;
@@ -364,8 +665,24 @@
     }
     /* true horizon */
     ctx.globalAlpha = 1;
-    ctx.lineWidth = 2.5;
-    seg({ x: 0, y: scene.ty }, { x: 1, y: scene.ty });
+    ctx.beginPath();
+    ctx.moveTo(0, hy);
+    ctx.lineTo(W, hy);
+    truthStroke(c, 6, 2.5);
+    /* which ⊕ was read against which VP — the pairing can swap */
+    if (lastPair) {
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      for (i = 0; i < 2; i++) {
+        vp = px(lastPair.swapped
+          ? (i === 0 ? scene.vpR : scene.vpL)
+          : (i === 0 ? scene.vpL : scene.vpR));
+        ctx.moveTo((i === 0 ? guess.v1 : guess.v2) * W, gy);
+        ctx.lineTo(vp.x, vp.y);
+      }
+      truthStroke(c, 4, 1.5);
+      ctx.setLineDash([]);
+    }
     /* true VPs */
     for (i = 0; i < 2; i++) {
       vp = px(i === 0 ? scene.vpL : scene.vpR);
@@ -384,17 +701,56 @@
     ctx.restore();
   }
 
+  /* the score, on the sheet where the eyes already are */
+  function drawStamp(c) {
+    if (!lastParts) return;
+    var l1 = Math.round(lastParts.total) + ' / 100';
+    var l2 = 'horizon ' + Math.round(lastParts.h) + ' · vps ' +
+      Math.round(lastParts.v[0]) + ', ' + Math.round(lastParts.v[1]);
+    ctx.save();
+    ctx.font = '700 15px Caveat, cursive';
+    var w1 = ctx.measureText(l1).width;
+    ctx.font = '600 11px "Cascadia Code", Menlo, Consolas, monospace';
+    var w2 = ctx.measureText(l2).width;
+    var w = Math.max(w1, w2) + 20, h = 44;
+    var x = 10, y = H - h - 10;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 8); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = c.card;
+    ctx.fill();
+    ctx.strokeStyle = c.line;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = c.ink;
+    ctx.font = '700 15px Caveat, cursive';
+    ctx.fillText(l1, x + 10, y + 4);
+    ctx.fillStyle = readable(c);
+    ctx.font = '600 11px "Cascadia Code", Menlo, Consolas, monospace';
+    ctx.fillText(l2, x + 10, y + 25);
+    ctx.restore();
+  }
+
   function draw() {
     var c = inks();
     ctx.clearRect(0, 0, W, H);
     if (!scene) return;
     drawWashes(c);
     drawBoxes(c);
+    drawStrokes(c);
     if (phase === 'guess') {
-      drawGuess(c, false);
-    } else if (phase === 'reveal' || phase === 'done') {
+      /* While tracing, the sheet belongs to the strokes — but the guide
+         may not VANISH, because "lock it in" stays live the whole time
+         and locking must never score something the player cannot see.
+         So it steps back to the faded treatment instead, and returns to
+         full weight the moment the four strokes resolve into two
+         crossings (applyTrace flips mode back to 'drag'). */
+      drawGuess(c, mode !== 'drag');
+    } else {
       drawGuess(c, true);
       drawReveal(c);
+      drawStamp(c);
     }
   }
 
@@ -408,25 +764,115 @@
   /* hit areas: markers 26px radius (52px wide), line ±22px (44px) */
   var drag = null; /* { id, kind: 'line'|'v1'|'v2', off } */
 
-  canvas.addEventListener('pointerdown', function (ev) {
+  function finishStroke() {
+    var fit = fitStrokeLine(rawPts, 0.06 * W);
+    rawPts = null;
+    if (!fit) {
+      showToast('too short — drag along an edge', false);
+      hint.textContent = 'that stroke was too short to read. ' + TRACE_PROMPT[strokes.length];
+      draw();
+      return;
+    }
+    /* the second stroke of a pair must actually cross the first */
+    if (strokes.length % 2 === 1) {
+      var prev = strokes[strokes.length - 1];
+      var cross = intersectFits(fitFromStored(prev), fit);
+      if (!cross) {
+        showToast('those two are parallel', false);
+        hint.textContent = 'those two edges run parallel, so they never cross — ' +
+          'pick edges at different heights. ' + TRACE_PROMPT[strokes.length];
+        draw();
+        return;
+      }
+      traceVP.push({ x: cross.x / W, y: cross.y / H });
+    }
+    strokes.push({
+      a: { x: fit.a.x / W, y: fit.a.y / H },
+      b: { x: fit.b.x / W, y: fit.b.y / H },
+    });
+    if (strokes.length >= 4) applyTrace();
+    else hint.textContent = TRACE_PROMPT[strokes.length];
+    setTraceButton();
+    draw();
+  }
+
+  /* a stored (normalized) stroke back to a px-space fit */
+  function fitFromStored(s) {
+    var a = px(s.a), b = px(s.b);
+    var dx = b.x - a.x, dy = b.y - a.y, m = Math.hypot(dx, dy) || 1;
+    return { x: a.x, y: a.y, ux: dx / m, uy: dy / m };
+  }
+
+  function applyTrace() {
+    var L = px(traceVP[0]), R = px(traceVP[1]);
+    if (L.x > R.x) { var t = L; L = R; R = t; }
+    guess.v1 = clampRange(L.x / W, 0.02, 0.98);
+    guess.v2 = clampRange(R.x / W, 0.02, 0.98);
+    guess.y = clampRange((L.y + R.y) / 2 / H, 0.04, 0.96);
+    mode = 'drag';
+    hint.textContent = 'your strokes cross there — and the horizon is the level line ' +
+      'through both crossings. nudge the ⊕s if you like, then lock it in.';
+  }
+
+  function undoStroke() {
+    if (!strokes.length) { setTraceMode(false); return; }
+    strokes.pop();
+    if (traceVP.length > Math.floor(strokes.length / 2)) traceVP.pop();
+    hint.textContent = TRACE_PROMPT[strokes.length];
+    setTraceButton();
+    draw();
+  }
+
+  function setTraceMode(on) {
     if (phase !== 'guess') return;
+    mode = on ? 'trace' : 'drag';
+    rawPts = null;
+    if (on) {
+      strokes = [];
+      traceVP = [];
+      hint.textContent = TRACE_PROMPT[0];
+    } else {
+      hint.textContent = guessHint();
+    }
+    setTraceButton();
+    draw();
+  }
+
+  /* One pointer at a time, in either mode: a second finger landing mid-
+     drag used to steal the gesture and leave the first one's capture
+     dangling. */
+  canvas.addEventListener('pointerdown', function (ev) {
+    if (phase !== 'guess' || drag) return;
     ev.preventDefault();
-    canvas.focus();
+    canvas.focus({ preventScroll: true });
     var p = pointerPos(ev);
+
+    if (mode === 'trace') {
+      drag = { id: ev.pointerId, kind: 'stroke', off: 0 };
+      rawPts = [p];
+      try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
+      draw();
+      return;
+    }
+
     var gy = guess.y * H;
     var d1 = Math.hypot(p.x - guess.v1 * W, p.y - gy);
     var d2 = Math.hypot(p.x - guess.v2 * W, p.y - gy);
     var kind = null, off = 0;
-    if (d1 <= 26 || d2 <= 26) {
+    /* Away from the markers the guide wins, and a held ⊕ carries the
+       whole line with it vertically — so a pull upward always raises the
+       horizon instead of silently sliding a marker sideways, and the
+       lesson (the ⊕s ride the line) is in the hand, not just the hint. */
+    if (Math.abs(p.y - gy) <= 22 && Math.min(d1, d2) > 26) {
+      kind = 'line';
+      off = gy - p.y;
+    } else if (d1 <= 26 || d2 <= 26) {
       kind = (d1 <= d2) ? 'v1' : 'v2';
       selMarker = (kind === 'v1') ? 1 : 2;
       off = (kind === 'v1' ? guess.v1 : guess.v2) * W - p.x;
-    } else if (Math.abs(p.y - gy) <= 22) {
-      kind = 'line';
-      off = gy - p.y;
     }
     if (!kind) return;
-    drag = { id: ev.pointerId, kind: kind, off: off };
+    drag = { id: ev.pointerId, kind: kind, off: off, offY: gy - p.y };
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     draw();
   });
@@ -436,23 +882,38 @@
     if (!drag || ev.pointerId !== drag.id || phase !== 'guess') return;
     ev.preventDefault();
     var p = pointerPos(ev);
-    if (drag.kind === 'line') guess.y = clampRange((p.y + drag.off) / H, 0.04, 0.96);
-    else if (drag.kind === 'v1') guess.v1 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
-    else guess.v2 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+    if (drag.kind === 'stroke') {
+      if (rawPts) rawPts.push(p);
+    } else if (drag.kind === 'line') {
+      guess.y = clampRange((p.y + drag.off) / H, 0.04, 0.96);
+    } else {
+      if (drag.kind === 'v1') guess.v1 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+      else guess.v2 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+      guess.y = clampRange((p.y + drag.offY) / H, 0.04, 0.96);
+    }
     draw();
   });
 
   function endDrag(ev) {
-    if (drag && ev.pointerId === drag.id) drag = null;
+    if (!drag || ev.pointerId !== drag.id) return;
+    var wasStroke = drag.kind === 'stroke';
+    drag = null;
+    if (wasStroke && phase === 'guess' && mode === 'trace') finishStroke();
+    else { rawPts = null; draw(); }
   }
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
 
   /* keyboard: arrows nudge (shift = fine), space swaps the active ⊕,
-     enter locks in / advances */
+     enter locks in / advances, escape leaves trace mode */
   canvas.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter') { ev.preventDefault(); btnLock.click(); return; }
+    if (ev.key === 'Enter') { ev.preventDefault(); lockOrNext(); return; }
     if (phase !== 'guess') return;
+    if (ev.key === 'Escape' || ev.key === 'Backspace') {
+      if (mode === 'trace') { ev.preventDefault(); undoStroke(); }
+      return;
+    }
+    if (mode === 'trace') return;
     var step = ev.shiftKey ? 0.002 : 0.012;
     if (ev.key === 'ArrowUp') guess.y = clampRange(guess.y - step, 0.04, 0.96);
     else if (ev.key === 'ArrowDown') guess.y = clampRange(guess.y + step, 0.04, 0.96);
@@ -466,9 +927,21 @@
     draw();
   });
 
-  btnLock.addEventListener('click', function () {
-    if (phase === 'guess') lockScene();
-    else if (phase === 'reveal') advance();
+  /* one debounced door between phases: on a phone "lock it in" and
+     "next scene" share a spot, and a routine double-tap used to skip
+     the reveal the drill exists to give */
+  function lockOrNext() {
+    var now = Date.now();
+    if (now - lastFlip < LOCK_MS) return;
+    if (phase === 'guess') { lastFlip = now; lockScene(); }
+    else if (phase === 'reveal') { lastFlip = now; advance(); }
+  }
+
+  btnLock.addEventListener('click', lockOrNext);
+  btnTrace.addEventListener('click', function () {
+    if (phase !== 'guess') return;
+    if (mode !== 'trace') setTraceMode(true);
+    else undoStroke();
   });
 
   /* ============ chrome wiring ============ */
@@ -485,7 +958,7 @@
     toastTimer = setTimeout(function () { toast.hidden = true; }, 2200);
   }
 
-  document.getElementById('btnRound').addEventListener('click', newRound);
+  document.getElementById('btnRound').addEventListener('click', requestNewRound);
 
   var btnHow = document.getElementById('btnHow');
   var howTo = document.getElementById('howTo');
@@ -495,7 +968,16 @@
   });
 
   ArtDaily.onTheme(draw);
-  window.addEventListener('resize', function () { fitCanvas(); draw(); });
+  window.addEventListener('resize', function () {
+    /* A gesture in flight is held in px: a half-drawn stroke, or a grab
+       offset measured against the old sheet. Resizing under it would fit
+       a line the player never drew, or snap a ⊕ sideways. Let go of it —
+       nothing is scored until "lock it in", so nothing is lost. */
+    drag = null;
+    rawPts = null;
+    fitCanvas();
+    draw();
+  });
 
   /* ============ boot ============ */
   fitCanvas();

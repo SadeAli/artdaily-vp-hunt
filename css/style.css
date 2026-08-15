@@ -393,5 +393,16 @@ a { color: inherit; }
   display: block;
   margin: 12px auto 0;
   min-width: 44%;
+  min-height: 44px;
 }
 #btnLock:disabled { transform: rotate(-0.5deg); }
+
+/* Thumb-sized controls (the sticker padding alone leaves them ~37px). */
+.game-controls .btn { min-height: 44px; }
+
+/* While tracing, the canvas is a drawing surface — say so, and mark the
+   trace button as the live mode. */
+#btnTrace[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--game-accent) 26%, var(--card));
+  border-color: color-mix(in srgb, var(--game-accent) 60%, var(--line));
+}

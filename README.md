@@ -1,13 +1,32 @@
 # Vanishing Point Hunt 🔭
 
 A perspective drill for [Art Daily](https://artdaily.sadeali.com/). Every scene is a
-flat-shaded city block rendered from a hidden horizon and two on-canvas vanishing
-points. Drag the dashed guide onto the horizon, park a ⊕ marker on each VP, lock it
-in — the reveal overlays the true geometry so you see exactly how far off you were.
+city block seen through a **real camera**: a level pinhole with a sampled focal
+length, principal point and yaw, solid 3D blocks standing on the ground plane, and
+every vertex divided by its own depth. The two vanishing points are then simply the
+projections of the two horizontal directions, so `(vpL − pu)(vpR − pu) = −f²` holds
+by construction — every scene is a city a real lens could have photographed, and the
+ground truth for scoring is exact rather than approximately right. Eye height is the
+unit, so a base sitting δ below the horizon is at depth `f/δ` and a roof τ above it
+is `1 + τ/δ` eye heights tall: the artist's eye-level rule, enforced by geometry.
 
-Three scenes per round, ramping up: smaller boxes, shorter edges, one VP hugging the
-frame. Scoring is pure distance — horizon 40% (zero at 12% of canvas height off),
-each VP 30% (zero at 15% of canvas width off); the round score is the mean of three.
+Two ways to hunt, both scored the same way:
+
+- **Drag** the dashed guide onto the hidden horizon and park a ⊕ marker on each VP.
+  The ⊕s ride the line — slide one sideways to move that VP, pull it up or down and
+  the horizon comes with it. Arrow keys nudge (shift = fine), space swaps ⊕, enter locks.
+- **Trace edges** — the easel habit. Draw along two receding edges of the same wall
+  and where your strokes cross *is* that vanishing point; two strokes per VP, and the
+  horizon falls out of the two crossings. Strokes are fitted by total least squares,
+  a too-short stroke or a parallel pair is refused for free, and undo pops the last one.
+
+Three scenes per round, ramping up: smaller blocks, shorter edges, one VP hugging the
+frame. Scoring is pure distance — horizon 40%, each VP 30% — with full credit inside a
+small bullseye (1.5% of the height, 2% of the width) so an honest 100 is earnable,
+fading to zero at 12% of the height for the horizon and 15% of the width for a VP. The
+round score is the mean of three, reported the moment the third scene locks. After each
+lock the reveal draws the true horizon, both VPs, every construction edge extended to
+them, and a connector from each of your ⊕s to the VP it was scored against.
 
 Run it: `python3 -m http.server 8080` in this folder. No build step, no dependencies.
 
