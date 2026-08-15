@@ -95,11 +95,46 @@
       : { scores: b, swapped: true };
   }
 
-  function sceneScore(h, v1, v2) { return 0.4 * h + 0.3 * v1 + 0.3 * v2; }
+  /* horizonScore/vpScore can only hand these finite 0–100 values, but a
+     scoring function that can emit NaN is one refactor away from writing
+     "NaN" into the HUD and the permanent best, so it refuses to. */
+  function finiteScore(v) { return (typeof v === 'number' && isFinite(v)) ? v : 0; }
+
+  function sceneScore(h, v1, v2) {
+    return 0.4 * finiteScore(h) + 0.3 * finiteScore(v1) + 0.3 * finiteScore(v2);
+  }
+
+  /* ---- reveal coaching: WHICH WAY the guess was off ----
+     The first reveal a beginner ever sees used to be four numbers
+     ("62/100 (eye level 71 · vanishing points 55, 60)") — and those same
+     four numbers are already stamped on the sheet, under their own labels,
+     where the eyes are. Repeating them in the hint spent the one sentence
+     the drill gets on arithmetic instead of on the lesson. Direction is the
+     lesson: "too low", "left of it" is a thing you can DO differently next
+     scene. Pure — pixel deltas in, English out, NaN-safe. */
+  function offBy(d, neg, pos) {
+    if (!isFinite(d)) return 'off the sheet';
+    return Math.round(Math.abs(d)) + 'px ' + (d < 0 ? neg : pos);
+  }
+
+  function markPhrase(dx) {
+    if (!isFinite(dx)) return 'off the sheet';
+    return Math.abs(dx) < 6 ? 'right on its point' : offBy(dx, 'left of it', 'right of it');
+  }
+
+  /* dy > 0 means the guide sat lower on the sheet than the true eye level;
+     dx > 0 means a ⊕ sat right of the vanishing point it was read against. */
+  function coachLine(dy, dxL, dxR) {
+    return (isFinite(dy) && Math.abs(dy) < 4
+      ? 'your line was right on the eye level'
+      : 'your line sat ' + offBy(dy, 'too high', 'too low')) +
+      '; the left ⊕ landed ' + markPhrase(dxL) +
+      ', the right ⊕ ' + markPhrase(dxR) + '.';
+  }
 
   function roundScore(scores) {
     var sum = 0, i;
-    for (i = 0; i < scores.length; i++) sum += scores[i];
+    for (i = 0; i < scores.length; i++) sum += finiteScore(scores[i]);
     return scores.length ? sum / scores.length : 0;
   }
 
@@ -505,9 +540,13 @@
     mode = 'drag';
     rawPts = null;
     phase = 'reveal';
-    hint.textContent = 'scene ' + (sceneIdx + 1) + ' — ' + Math.round(s) + '/100 ' +
-      '(eye level ' + Math.round(h) + ' · vanishing points ' + Math.round(pair.scores[0]) + ', ' +
-      Math.round(pair.scores[1]) + '). the coloured lines are the real answer.';
+    /* the ⊕ each guess was actually read against — the pairing can swap */
+    var tL = pair.swapped ? t2 : t1;
+    var tR = pair.swapped ? t1 : t2;
+    hint.textContent = 'scene ' + (sceneIdx + 1) + ' — ' + Math.round(s) + '/100. ' +
+      coachLine(guess.y * H - scene.ty * H, g1.x - tL.x, g2.x - tR.x) +
+      ' the coloured line and rings are the real answer' +
+      (sceneIdx === 0 ? ' — both points always sit ON the eye level, which is why the ⊕s ride it.' : '.');
     hudScore.textContent = String(Math.round(roundScore(sceneScores)));
     var isLast = sceneIdx === SCENES_PER_ROUND - 1;
     btnLock.textContent = isLast ? 'finish round' : 'next scene →';
