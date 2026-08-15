@@ -53,10 +53,23 @@
   var V_FULL_PX = 10, V_ZERO_PX = 48;
 
   function clampRange(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
-  function clamp01(v) { return clampRange(v, 0, 1); }
+  /* NaN-safe: any non-comparable input falls to 0. clampRange cannot be,
+     because a NaN there has to stay visible as a broken coordinate, but
+     the scoring path must not be able to hand one on: NaN fails BOTH
+     comparisons in a clamp written as a pair of ternaries, so it sails
+     straight through and 100 × NaN is NaN. */
+  function clamp01(v) { return v > 0 ? (v < 1 ? v : 1) : 0; }
 
+  /* The bands themselves are checked, not just the distance. A band that
+     is not a finite width apart makes (zero − dist) / (zero − full) come
+     out Infinity/Infinity = NaN for the ONE input that ought to score
+     best — a dead-centre guess — and that NaN then reaches the HUD, the
+     score stamp and the permanent best as literal text. A band that is
+     not a band scores nothing instead. With the drill's own constants
+     zero is always comfortably greater than full, on every sheet size
+     and through every ease, so this is the identity in real play. */
   function bandScore(dist, full, zero) {
-    if (!isFinite(dist)) return 0;
+    if (!isFinite(dist) || !isFinite(full) || !isFinite(zero) || !(zero > full)) return 0;
     return 100 * clamp01((zero - dist) / (zero - full));
   }
 
@@ -97,8 +110,13 @@
 
   /* horizonScore/vpScore can only hand these finite 0–100 values, but a
      scoring function that can emit NaN is one refactor away from writing
-     "NaN" into the HUD and the permanent best, so it refuses to. */
-  function finiteScore(v) { return (typeof v === 'number' && isFinite(v)) ? v : 0; }
+     "NaN" into the HUD and the permanent best, so it refuses to — and it
+     refuses a finite number outside 0–100 for exactly the same reason,
+     because "3e+307 / 100" on the score stamp is no better than "NaN".
+     Clamping is the identity on every value this drill has ever produced. */
+  function finiteScore(v) {
+    return (typeof v === 'number' && isFinite(v)) ? clampRange(v, 0, 100) : 0;
+  }
 
   function sceneScore(h, v1, v2) {
     return 0.4 * finiteScore(h) + 0.3 * finiteScore(v1) + 0.3 * finiteScore(v2);
@@ -216,16 +234,32 @@
 
   ArtDaily.init({ slug: SLUG });
 
-  /* ---- theme-aware inks (re-read on every repaint) ---- */
+  /* ---- theme-aware inks ----
+     getComputedStyle() on the root forces the style engine to resolve, and
+     this used to run at the top of EVERY repaint — i.e. once per pointer
+     sample while a ⊕ is under the finger, plus five string reads and, via
+     readable(), a hex parse and an rgb() string build per marker. The
+     tokens only move when the sheet flips theme, so cache them against
+     data-theme: the cache invalidates itself the moment the attribute
+     changes, whoever changed it, so onTheme still repaints in the new
+     colours without needing to be told. */
+  var inkCache = null, inkKey = null;
   function inks() {
+    var key = document.documentElement.dataset.theme || '';
+    if (inkCache && inkKey === key) return inkCache;
     var cs = getComputedStyle(document.documentElement);
-    return {
+    var c = {
       ink: cs.getPropertyValue('--ink').trim(),
       muted: cs.getPropertyValue('--muted').trim(),
       card: cs.getPropertyValue('--card').trim(),
       line: cs.getPropertyValue('--line').trim(),
       accent: cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--sky').trim(),
     };
+    var m = hexRgb(c.muted), i = hexRgb(c.ink);
+    c.soft = (m && i) ? mixColor(m, i, 0.45) : c.ink;
+    inkKey = key;
+    inkCache = c;
+    return c;
   }
 
   function hexRgb(hex) {
@@ -243,23 +277,47 @@
 
   /* --muted alone sits just under 4.5:1 on the paper card, so anything
      meaning-bearing (the player's own guide, the score stamp) gets inked
-     toward graphite until it clears AA on both sheets. */
-  function readable(c) {
-    var m = hexRgb(c.muted), i = hexRgb(c.ink);
-    return (m && i) ? mixColor(m, i, 0.45) : c.ink;
-  }
+     toward graphite until it clears AA on both sheets. Mixed once per
+     theme in inks(), not once per stroked marker. */
+  function readable(c) { return c.soft || c.ink; }
 
-  /* ---- crisp canvas at any devicePixelRatio; height tracks width ---- */
-  var W = 0, H = 0;
+  /* ---- crisp canvas at any devicePixelRatio; height tracks width ----
+     Returns true only when the sheet actually changed size. Assigning
+     canvas.width reallocates and clears the backing store, and on a phone
+     `resize` fires on every address-bar nudge — re-fitting for a frame
+     that is identical to the one already there is pure cost, and it is
+     also what let an ordinary scroll drop a gesture in flight. */
+  var W = 0, H = 0, fitDpr = 0;
   function fitCanvas() {
     var rect = canvas.getBoundingClientRect();
-    W = Math.max(1, Math.round(rect.width));
-    H = Math.round(W * ASPECT);
+    var w = Math.max(1, Math.round(rect.width));
     var dpr = window.devicePixelRatio || 1;
+    if (w === W && dpr === fitDpr) return false;
+    W = w;
+    H = Math.round(W * ASPECT);
+    fitDpr = dpr;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     canvas.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return true;
+  }
+
+  /* ---- one repaint per frame ----
+     A pointermove can arrive two or three times per displayed frame (and
+     with coalesced samples, far more), and every one of them used to
+     repaint the whole sheet: washes, five solid blocks, their facades,
+     the strokes, a live total-least-squares refit. Only the last of those
+     frames is ever shown, so the rest is work done to be thrown away —
+     and on a phone it is exactly the work that makes a drag feel like it
+     is being dragged through treacle. Fold them into one rAF: the paint
+     still lands on the same vsync, the frames in between are simply not
+     painted twice. */
+  var drawQueued = false;
+  function requestDraw() {
+    if (drawQueued) return;
+    drawQueued = true;
+    requestAnimationFrame(function () { drawQueued = false; draw(); });
   }
 
   /* ============================================================
@@ -878,9 +936,43 @@
 
   /* ============ input ============ */
 
+  /* getBoundingClientRect() is a layout read, and this used to run once
+     per pointer sample — the single most expensive thing in the move
+     handler. The sheet cannot move under a gesture without a scroll or a
+     resize, and the hint line above it can only re-wrap between gestures,
+     so the rect is measured afresh at every pointerdown and whenever the
+     page scrolls or resizes, and reused for the rest of the stroke. */
+  var canvasRect = null;
+  function dropRect() { canvasRect = null; }
+  window.addEventListener('scroll', dropRect, true);
+
   function pointerPos(ev) {
-    var rect = canvas.getBoundingClientRect();
-    return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    var r = canvasRect || (canvasRect = canvas.getBoundingClientRect());
+    return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  }
+
+  /* SAMPLING FIDELITY ON A FAST EDGE. One pointermove is one sample, but
+     the digitizer under it reports at 120–240Hz and the browser hands
+     over only what it could deliver in time — on a quick trace that is
+     most of the stroke thrown away, and under twelve survivors trimHooks
+     stops trimming, so the acceleration hooks it exists to remove are
+     back in the fit. Ask for the merged samples.
+     They are then thinned to a minimum spacing, because a
+     total-least-squares fit weights every sample alike: without it the
+     slow patch where the hand hesitated (fifty samples in ten pixels)
+     outvotes the whole confident rest of the edge. Evenly spaced samples
+     fit the line the hand drew, not the places it lingered. */
+  var SAMPLE_MIN_PX = 2;
+  function pushSamples(ev, arr) {
+    var list = null;
+    try { list = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null; } catch (e) { list = null; }
+    if (!list || !list.length) list = [ev];
+    for (var i = 0; i < list.length; i++) {
+      var p = pointerPos(list[i]);
+      if (!isFinite(p.x) || !isFinite(p.y)) continue;
+      var last = arr.length ? arr[arr.length - 1] : null;
+      if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= SAMPLE_MIN_PX) arr.push(p);
+    }
   }
 
   /* hit areas: markers 26px radius (52px wide), line ±22px (44px) */
@@ -978,6 +1070,7 @@
     if (drag) return;
     ev.preventDefault();
     canvas.focus({ preventScroll: true });
+    dropRect();                 /* a fresh gesture re-measures the sheet */
     var p = pointerPos(ev);
 
     if (mode === 'trace') {
@@ -1020,17 +1113,24 @@
     /* phase guard: locking in mid-drag (Enter) must freeze the guess */
     if (!drag || ev.pointerId !== drag.id || phase !== 'guess') return;
     ev.preventDefault();
-    var p = pointerPos(ev);
     if (drag.kind === 'stroke') {
-      if (rawPts) rawPts.push(p);
-    } else if (drag.kind === 'line') {
-      guess.y = clampRange((p.y + drag.off) / H, 0.04, 0.96);
+      if (rawPts) pushSamples(ev, rawPts);
     } else {
-      if (drag.kind === 'v1') guess.v1 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
-      else guess.v2 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
-      guess.y = clampRange((p.y + drag.offY) / H, 0.04, 0.96);
+      var p = pointerPos(ev);
+      /* clampRange is a pair of ternaries, and NaN fails both — a single
+         non-finite sample would write NaN into the guess, the ⊕ would
+         leave the sheet and there would be no gesture that brings it
+         back. Drop the sample instead; the next one is 4ms away. */
+      if (!isFinite(p.x) || !isFinite(p.y)) return;
+      if (drag.kind === 'line') {
+        guess.y = clampRange((p.y + drag.off) / H, 0.04, 0.96);
+      } else {
+        if (drag.kind === 'v1') guess.v1 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+        else guess.v2 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+        guess.y = clampRange((p.y + drag.offY) / H, 0.04, 0.96);
+      }
     }
-    draw();
+    requestDraw();
   });
 
   function endDrag(ev) {
@@ -1071,7 +1171,8 @@
     } else if (ev.key === ' ') selMarker = (selMarker === 1) ? 2 : 1;
     else return;
     ev.preventDefault();
-    draw();
+    /* a held arrow auto-repeats faster than the screen refreshes */
+    requestDraw();
   });
 
   /* one debounced door between phases: on a phone "lock it in" and
@@ -1116,13 +1217,23 @@
 
   ArtDaily.onTheme(draw);
   window.addEventListener('resize', function () {
+    dropRect();
     /* A gesture in flight is held in px: a half-drawn stroke, or a grab
-       offset measured against the old sheet. Resizing under it would fit
-       a line the player never drew, or snap a ⊕ sideways. Let go of it —
-       nothing is scored until "lock it in", so nothing is lost. */
-    drag = null;
-    rawPts = null;
-    fitCanvas();
+       offset measured against the old sheet. A sheet that really did
+       change size would fit a line the player never drew, or snap a ⊕
+       sideways, so that gesture is let go — nothing is scored until "lock
+       it in", so nothing is lost.
+       But `resize` also fires when a phone's address bar slides away
+       during an ordinary scroll, and the sheet's width — which is all
+       this drill's geometry depends on — has not moved a pixel. Dropping
+       the stroke there is the drill flinching at nothing: the ⊕ under the
+       finger goes dead mid-drag for no reason the player can see. So the
+       gesture is only abandoned when fitCanvas says the sheet actually
+       changed. */
+    if (fitCanvas()) {
+      drag = null;
+      rawPts = null;
+    }
     draw();
   });
 
