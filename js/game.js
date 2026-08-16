@@ -599,6 +599,17 @@
      already in the books — no question then, the button just deals
      another one. */
   var abandonArmed = false, abandonTimer = null;
+  /* The question goes stale the moment the player does something else. It
+     used to stay armed for its whole four seconds no matter what happened
+     in between, so "new round" → change your mind → lock another scene →
+     "new round" again binned a live round on a SINGLE press, with the
+     confirmation silently spent on a question asked several seconds and one
+     scene ago. Anything that moves the round on disarms it. */
+  function disarmAbandon() {
+    clearTimeout(abandonTimer);
+    abandonTimer = null;
+    abandonArmed = false;
+  }
   function requestNewRound() {
     if (sceneScores.length && sceneScores.length < SCENES_PER_ROUND && !abandonArmed) {
       abandonArmed = true;
@@ -607,12 +618,12 @@
       abandonTimer = setTimeout(function () { abandonArmed = false; }, 4000);
       return;
     }
-    clearTimeout(abandonTimer);
-    abandonArmed = false;
+    disarmAbandon();
     newRound();
   }
 
   function lockScene() {
+    disarmAbandon();   /* a scene just landed — any pending "sure?" is stale */
     var g1 = { x: guess.v1 * W, y: guess.y * H };
     var g2 = { x: guess.v2 * W, y: guess.y * H };
     var t1 = { x: scene.vpL.x * W, y: scene.vpL.y * H };
@@ -708,6 +719,66 @@
     ctx.globalAlpha = 0.025;
     for (i = 1; i <= 3; i++) ctx.fillRect(0, H - H * 0.1 * i, W, H * 0.1 * i);
     ctx.globalAlpha = 1;
+  }
+
+  /* ---- THE CITY IS A STILL LIFE ----
+     Nothing in the washes or the blocks moves while a ⊕ is under the
+     finger: they are a function of the scene, the fitted sheet and the
+     theme, and of nothing else. They were being painted again for every
+     frame of every drag anyway — six full-width alpha fills (1.4 sheets of
+     blending), sixty polygon fills, and a hundred-odd hairlines and edges,
+     all pixel-identical to the frame before. The parts that actually MOVE
+     are one dashed line and two 13px markers.
+     So paint the still life once onto an offscreen sheet and blit it. The
+     cache keys itself on the scene object, the fitted size, the dpr and the
+     ink object — inks() hands back a NEW object the moment data-theme
+     changes — so a new scene, a resize, a dpr change and a theme flip each
+     invalidate it without being told, and onTheme still repaints in the new
+     colours. If the offscreen sheet cannot be made at all, the old direct
+     path is still right there. */
+  var still = null, stillCtx = null;
+  var stillScene = null, stillW = 0, stillH = 0, stillDpr = 0, stillInks = null;
+
+  function stillFresh(c) {
+    return !!still && stillScene === scene && stillW === W && stillH === H &&
+      stillDpr === fitDpr && stillInks === c;
+  }
+
+  function drawStill(c) {
+    if (!stillFresh(c)) {
+      if (!still) {
+        try {
+          still = document.createElement('canvas');
+          stillCtx = still.getContext('2d');
+        } catch (e) { stillCtx = null; }
+        if (!stillCtx) { still = null; }
+      }
+      var dpr = fitDpr || 1;
+      var pw = Math.round(W * dpr), ph = Math.round(H * dpr);
+      /* a zero-sized offscreen sheet is not a drawable image — drawImage
+         throws on one, and a throw inside draw() takes the drill with it */
+      if (!still || !(pw > 0) || !(ph > 0)) { drawWashes(c); drawBoxes(c); return; }
+      still.width = pw;                     /* also clears the backing store */
+      still.height = ph;
+      /* every painter below draws into `ctx` by name, so lend it to the
+         offscreen sheet for the duration — synchronously, so nothing else
+         can observe the swap. The `finally` is what makes the loan safe: a
+         painter that threw with the loan outstanding would leave `ctx`
+         pointing at the offscreen sheet for the rest of the session, and the
+         drill would go on painting perfectly into a canvas nobody can see. */
+      var sheet = ctx;
+      try {
+        ctx = stillCtx;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawWashes(c);
+        drawBoxes(c);
+      } finally {
+        ctx = sheet;
+      }
+      stillScene = scene; stillW = W; stillH = H; stillDpr = fitDpr; stillInks = c;
+    }
+    ctx.globalAlpha = 1;
+    ctx.drawImage(still, 0, 0, W, H);
   }
 
   function drawBoxes(c) {
@@ -946,8 +1017,7 @@
     var c = inks();
     ctx.clearRect(0, 0, W, H);
     if (!scene) return;
-    drawWashes(c);
-    drawBoxes(c);
+    drawStill(c);
     drawStrokes(c);
     if (phase === 'guess') {
       /* While tracing, the sheet belongs to the strokes — but the guide
@@ -992,17 +1062,26 @@
      slow patch where the hand hesitated (fifty samples in ten pixels)
      outvotes the whole confident rest of the edge. Evenly spaced samples
      fit the line the hand drew, not the places it lingered. */
+  /* Reports whether anything was actually kept, so a move whose samples all
+     fell inside the 2px filter — a hand resting still, or creeping the last
+     pixel onto an edge — does not schedule a repaint of a frame identical to
+     the one already on the sheet. (perspective's twin already does this;
+     during a trace the live fit below is the whole per-frame cost.) */
   var SAMPLE_MIN_PX = 2;
   function pushSamples(ev, arr) {
-    var list = null;
+    var list = null, added = false;
     try { list = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null; } catch (e) { list = null; }
     if (!list || !list.length) list = [ev];
     for (var i = 0; i < list.length; i++) {
       var p = pointerPos(list[i]);
       if (!isFinite(p.x) || !isFinite(p.y)) continue;
       var last = arr.length ? arr[arr.length - 1] : null;
-      if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= SAMPLE_MIN_PX) arr.push(p);
+      if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= SAMPLE_MIN_PX) {
+        arr.push(p);
+        added = true;
+      }
     }
+    return added;
   }
 
   /* hit areas: markers 26px radius (52px wide), line ±22px (44px) */
@@ -1163,21 +1242,21 @@
     if (!drag || ev.pointerId !== drag.id || phase !== 'guess') return;
     ev.preventDefault();
     if (drag.kind === 'stroke') {
-      if (rawPts) pushSamples(ev, rawPts);
+      if (rawPts && pushSamples(ev, rawPts)) requestDraw();
+      return;
+    }
+    var p = pointerPos(ev);
+    /* clampRange is a pair of ternaries, and NaN fails both — a single
+       non-finite sample would write NaN into the guess, the ⊕ would
+       leave the sheet and there would be no gesture that brings it
+       back. Drop the sample instead; the next one is 4ms away. */
+    if (!isFinite(p.x) || !isFinite(p.y)) return;
+    if (drag.kind === 'line') {
+      guess.y = clampRange((p.y + drag.off) / H, 0.04, 0.96);
     } else {
-      var p = pointerPos(ev);
-      /* clampRange is a pair of ternaries, and NaN fails both — a single
-         non-finite sample would write NaN into the guess, the ⊕ would
-         leave the sheet and there would be no gesture that brings it
-         back. Drop the sample instead; the next one is 4ms away. */
-      if (!isFinite(p.x) || !isFinite(p.y)) return;
-      if (drag.kind === 'line') {
-        guess.y = clampRange((p.y + drag.off) / H, 0.04, 0.96);
-      } else {
-        if (drag.kind === 'v1') guess.v1 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
-        else guess.v2 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
-        guess.y = clampRange((p.y + drag.offY) / H, 0.04, 0.96);
-      }
+      if (drag.kind === 'v1') guess.v1 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+      else guess.v2 = clampRange((p.x + drag.off) / W, 0.02, 0.98);
+      guess.y = clampRange((p.y + drag.offY) / H, 0.04, 0.96);
     }
     requestDraw();
   });
