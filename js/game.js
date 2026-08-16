@@ -135,19 +135,31 @@
     return Math.round(Math.abs(d)) + 'px ' + (d < 0 ? neg : pos);
   }
 
-  function markPhrase(dx) {
+  /* A ⊕ RIDES THE GUIDE, so its vertical error IS the line's error — and
+     this used to be judged on the horizontal miss alone. Park the guide
+     90px above the true eye level with both ⊕s in perfectly the right
+     columns and the first reveal a beginner ever reads said "the left ⊕
+     landed right on its point, the right ⊕ right on its point" next to a
+     score of 40, because both marks in fact scored near zero. The one
+     sentence the reveal gets may not contradict the number beside it:
+     sideways-aligned but riding a missed line is now said out loud. */
+  function markPhrase(dx, dy) {
     if (!isFinite(dx)) return 'off the sheet';
-    return Math.abs(dx) < 6 ? 'right on its point' : offBy(dx, 'left of it', 'right of it');
+    if (Math.abs(dx) >= 6) return offBy(dx, 'left of it', 'right of it');
+    if (isFinite(dy) && Math.abs(dy) >= 6) return 'straight ' + (dy < 0 ? 'above' : 'below') + ' it';
+    return 'right on its point';
   }
 
   /* dy > 0 means the guide sat lower on the sheet than the true eye level;
-     dx > 0 means a ⊕ sat right of the vanishing point it was read against. */
+     dx > 0 means a ⊕ sat right of the vanishing point it was read against.
+     Both VPs sit ON the true eye level and both ⊕s sit ON the guide, so
+     the same dy is every mark's vertical miss. */
   function coachLine(dy, dxL, dxR) {
     return (isFinite(dy) && Math.abs(dy) < 4
       ? 'your line was right on the eye level'
       : 'your line sat ' + offBy(dy, 'too high', 'too low')) +
-      '; the left ⊕ landed ' + markPhrase(dxL) +
-      ', the right ⊕ ' + markPhrase(dxR) + '.';
+      '; the left ⊕ landed ' + markPhrase(dxL, dy) +
+      ', the right ⊕ ' + markPhrase(dxR, dy) + '.';
   }
 
   function roundScore(scores) {
@@ -509,7 +521,7 @@
   function guessHint() {
     return 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND +
       ' — a vanishing point is where a set of parallel edges appears to meet in the distance.' +
-      ' drag the dashed guide onto the eye level (the horizon) and a ⊕ onto each vanishing point.' +
+      ' press anywhere to drop the dashed guide on the eye level (the horizon), then slide a ⊕ onto each vanishing point.' +
       ' the ⊕s ride the line: pull one up or down and the horizon comes with it.' +
       (sceneIdx === 0 ? ' this first one is scored gently while you find your feet.' : '');
   }
@@ -1072,6 +1084,11 @@
     canvas.focus({ preventScroll: true });
     dropRect();                 /* a fresh gesture re-measures the sheet */
     var p = pointerPos(ev);
+    /* The press now WRITES to the guess (see the dead-press branch below),
+       and clampRange is a pair of ternaries that NaN sails straight
+       through — so one non-finite sample would put NaN in guess.y with no
+       gesture that brings it back. Drop it, as pointermove already does. */
+    if (!isFinite(p.x) || !isFinite(p.y)) return;
 
     if (mode === 'trace') {
       drag = { id: ev.pointerId, kind: 'stroke', off: 0 };
@@ -1102,8 +1119,22 @@
       kind = (d1 <= d2) ? 'v1' : 'v2';
       selMarker = (kind === 'v1') ? 1 : 2;
       off = (kind === 'v1' ? guess.v1 : guess.v2) * W - p.x;
+    } else {
+      /* DEAD PRESS. The guide opens at 0.8 of the sheet and the true eye
+         level is never lower than 0.58, so a beginner's very first move —
+         press where the horizon looks like it is — landed on neither the
+         guide nor a ⊕, and the drill did NOTHING: no ink, no toast, no
+         sentence. That reads as a broken page rather than as a miss, on
+         the one action the first screen asks for. A press with nothing
+         under it now drops the guide there and keeps dragging, exactly as
+         the sibling horizon drill has always done. It cannot steal a ⊕:
+         both are further than markR away or the branch above would have
+         taken it, and nothing is scored until "lock it in". */
+      kind = 'line';
+      guess.y = clampRange(p.y / H, 0.04, 0.96);
+      gy = guess.y * H;
+      off = gy - p.y;   /* 0 unless the press was outside the clamp band */
     }
-    if (!kind) return;
     drag = { id: ev.pointerId, kind: kind, off: off, offY: gy - p.y };
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     draw();

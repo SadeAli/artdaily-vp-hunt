@@ -13,8 +13,10 @@ is `1 + τ/δ` eye heights tall: the artist's eye-level rule, enforced by geomet
 Two ways to hunt, both scored the same way:
 
 - **Drag** the dashed guide onto the hidden horizon and park a ⊕ marker on each VP.
-  The ⊕s ride the line — slide one sideways to move that VP, pull it up or down and
-  the horizon comes with it. Arrow keys nudge (shift = fine), space swaps ⊕, enter locks.
+  A press anywhere with nothing under it drops the guide right there and keeps
+  dragging, so the first thing you try is never a no-op. The ⊕s ride the line — slide
+  one sideways to move that VP, pull it up or down and the horizon comes with it.
+  Arrow keys nudge (shift = fine), space swaps ⊕, enter locks.
 - **Trace edges** — the easel habit. Draw along two receding edges of the same wall
   and where your strokes cross *is* that vanishing point; two strokes per VP, and the
   horizon falls out of the two crossings. Strokes are fitted by total least squares,
