@@ -518,12 +518,30 @@
     'one more RIGHT-going edge, at a different height (2 of 2).',
   ];
 
+  /* SCENE 1 TEACHES; SCENES 2 AND 3 GET OUT OF THE WAY.
+     The same definition was re-read at the top of every scene, so two
+     thirds of the sentences this drill gets were spent explaining a term
+     the player had already been scored on twice — while scene 1 itself
+     still never answered the two questions a beginner actually has on
+     sight. WHY ARE THERE TWO MARKERS: two ⊕s appear on the sheet and the
+     old wording ("slide a ⊕ onto each vanishing point") assumed you
+     already knew there were two of them, and why. WHICH LINE AM I AIMING
+     AT: "drop the dashed guide on the eye level" reads as though the eye
+     level is something you can see, when the whole drill is that it is
+     hidden and the dashed line is only your guess at it. And "a set of
+     parallel edges" named nothing on the screen — the edges meant are the
+     long ones running away from you, which is a thing you can point at.
+     Answer all three once, on the screen where they are asked, then hand
+     the sheet over. */
   function guessHint() {
-    return 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND +
-      ' — a vanishing point is where a set of parallel edges appears to meet in the distance.' +
-      ' press anywhere to drop the dashed guide on the eye level (the horizon), then slide a ⊕ onto each vanishing point.' +
-      ' the ⊕s ride the line: pull one up or down and the horizon comes with it.' +
-      (sceneIdx === 0 ? ' this first one is scored gently while you find your feet.' : '');
+    var n = 'scene ' + (sceneIdx + 1) + ' of ' + SCENES_PER_ROUND + ' — ';
+    if (sceneIdx !== 0) {
+      return n + 'drop the dashed guide on the hidden eye level, park a ⊕ on each vanishing point, then lock it in.';
+    }
+    return n + 'the long edges running away from you appear to meet at one spot: a vanishing point.' +
+      ' this view has two, and they both sit on the hidden eye level. press anywhere to drop the dashed' +
+      ' guide on that level, then slide a ⊕ onto each point. the ⊕s ride the line — pull one up or down' +
+      ' and the line follows. this first one is scored gently.';
   }
 
   function syncLockButton() {
